@@ -1,0 +1,471 @@
+﻿# -*- coding: utf-8 *-*
+"""
+功能: CBETA BM-UTF8 (簡單標記版) 轉為 XML-P5-UTF8
+命令列參數:
+	參數1: 冊數
+需求: Python 2.6, PythonWin
+作者: 周邦信 2009.06.02-06.19
+"""
+
+gaiji_path = 'C:/cbeta/work/bin/gaiji-m.mdb' # 缺字資料庫路徑
+
+
+import datetime, dircache, os, codecs, re, struct, sys
+import win32com.client # 要安裝 PythonWin
+
+if len(sys.argv)<2:
+	print u'使用方法: bm2p5.py 冊數\n例如: bm2p5.py J23'
+	sys.exit()
+vol = sys.argv[1].upper()
+ed = vol[0:1]
+dir_in = '../../simple/' + vol
+dir_out = '../../xml/' + vol
+if not os.path.exists(dir_out): os.makedirs(dir_out)
+
+cfg={}
+cfg["EditionDate"] = datetime.date.today();
+cfg["laiyuan"] = "/cbwork/simple/%s/source.txt" % vol;
+cfg["jingwen"] = "/cbwork/simple/%s/new.txt" % vol;
+
+wit = ''
+if vol.startswith('T'):
+	wit = u"【大】"
+elif vol.startswith('X'):
+	wit = u"【卍續】"
+elif vol.startswith('J'):
+	wit = u"【嘉興】"
+elif vol.startswith('H'):
+	wit = u"【正史】"
+elif vol.startswith('W'):
+	wit = u"【藏外】"
+elif vol.startswith('A'):
+	wit = u"【金藏】"
+elif vol.startswith('D'):
+	wit = u"【國家圖書館善本佛典】"
+
+debug = True
+
+buf = ''
+buf1 = ''
+juan_num = 0
+char_count = 1
+fo = ''
+head_tag = ''
+hold = False
+div_head = ''
+gaijis = {}
+line_num = ''
+mulu_start = False
+open = {}
+open['div'] = 0
+old_pb = ''
+sutras = {}
+
+def out(s):
+	global buf
+	out1(buf)
+	buf = ''
+	out1(s)
+
+def out1(s):
+	global buf1
+	buf1 += s
+
+def start_i(tag):
+	level = 1
+	mo = re.search(r'\d+', tag)
+	if mo!=None: level = int(mo.group())
+	if not 'item' in open: open['item'] = 0
+	while open['item']>= level:
+		out1('</item>')
+		open['item'] -= 1
+	check_open('p')
+	record_open('list')
+	out('<list>')
+	out('<item>')
+	open['item'] += 1
+		
+def start_p(tag):
+	check_open('p', 'byline', 'head')
+	r = get_number(tag)
+	out('<p xml:id="p%sp%s%s01"' % (vol, old_pb, line_num))
+	if 'r' in head_tag:
+		out(' type="pre"')
+	if r!='':
+		out(' rend="margin-left:%sem"' % r)
+	out('>')
+	open['p']=1
+
+def start_inline_p(tag):
+	check_open('p')
+	s = '<p xml:id="p%sp%s%s%02d"' % (vol, old_pb, line_num, char_count)
+	if char_count>1: s += ' cb:type="inline"'
+	mo = re.search(r'<p,(\d+),(\d+)>', tag)
+	if mo!=None:
+		s += ' rend="margin-left:%sem;text-indent:%sem"' % mo.groups()
+	else:
+		mo = re.search(r'\d+', tag)
+		if mo!=None:
+			s += ' rend="margin-left:%sem"' % mo.group()
+	s += '>'
+	out(s)
+	open['p']=1
+	
+def start_div(level, type):
+	check_open('p')
+	close_div(level)
+	open['div'] = level
+	if type=='other' and 'W' in head_tag:
+		out('<cb:div type="w">')
+	else:
+		out('<cb:div type="%s">' % type)
+	
+def start_inline_q(tag):
+	global buf, div_head, head_tag, mulu_start
+	i=tag.find('m=')
+	div_head = ''
+	level = 0
+	label = ''
+	if i > -1:
+		label=tag[i+2:-1]
+		level = int(tag[2:i-1])
+	else:
+		level = int(tag[2:-1])
+		mulu_start = True
+	start_div(level, 'other')
+	if i > -1:
+		out('<cb:mulu level="%d">%s</cb:mulu>' % (level, label))
+	buf += '<head>'
+	open['head'] = 1
+
+def close_div(level):
+	while open['div'] >= level:
+		out1('</cb:div>')
+		open['div'] -= 1
+
+def start_q(tag):
+	global buf, current_div_level, div_head, mulu_start
+	
+	if '=' in head_tag:
+		return
+	
+	div_head = ''
+	level = 0
+	
+	mo = re.search(r'\d+', tag)
+	if mo!=None:
+		level = int(mo.group())
+		
+	mulu_start = True
+	start_div(level, 'other')
+	buf += '<head>'
+	open['head'] = 1
+
+def corr2app(s):
+	repl = ur'<app><lem wit="【CBETA】" resp="CBETA.maha">\1</lem><rdg wit="%s">\2</rdg></app>' % wit
+	s = re.sub(r'\[([^>]*?)>(.*?)\]', repl, s)
+	return s
+
+def myLength(s):
+	len = 0
+	for c in s:
+		if c in u'◎。，、；：「」『』（）？！—…《》〈〉．“”　〔〕【】()': continue
+		len += 1
+	return len
+	
+def close_q(tag):
+	check_open('jhead', 'juan')
+	level = int(tag[3:-1])
+	close_div(level)
+		
+def start_inline_T(tag):
+	if not 'lg' in open: open['lg'] = 0
+	if open['lg']==0:
+		check_open('p')
+		out('<lg xml:id="lg%sp%s%s01" type="abnormal">' % (vol, old_pb, line_num))
+		open['lg'] = 1
+	check_open('l')
+	r=get_number(tag)
+	out('<l rend="text-indent:%sem">' % r)
+	record_open('l')
+	
+def start_inline_o(tag):
+	check_open('p')
+	if 'commentary' in open and open['commentary']>0:
+		out1('</cb:div>')
+		open['div'] -= 1
+	start_div(open['div']+1, 'orig')
+	open['orig'] = 1
+	
+def start_inline_u(tag):
+	check_open('p')
+	if 'orig' in open and open['orig']>0:
+		out1('</cb:div>')
+		open['div'] -= 1
+	start_div(open['div']+1, 'commentary')
+	open['commentary'] = 1
+	
+def inline_tag(tag):
+	global juan_num
+	if tag =='<j>':
+		check_open('p')
+		out('<juan fun="close"><jhead>')
+		record_open('juan')
+		record_open('jhead')
+	elif tag.startswith('<J'):
+		start_J(tag)
+	elif tag =='</L>':
+		check_open('p', 'item', 'list')
+	elif tag.startswith('<mj'):
+		n=get_number(tag)
+		out('<milestone n="%s" unit="juan"/>' % n)
+	elif tag=='<o>':
+		start_inline_o(tag)
+	elif tag.startswith('<p'):
+		start_inline_p(tag)
+	elif tag.startswith('<Q'):
+		start_inline_q(tag)
+	elif tag.startswith('</Q'):
+		close_q(tag)
+	elif tag.startswith('<T'):
+		start_inline_T(tag)
+	elif tag=='</T>':
+		check_open('l', 'lg')
+	elif tag=='<u>':
+		start_inline_u(tag)
+	elif tag=='</u>':
+		check_open('p')
+		out1('</cb:div>')
+		open['div'] -= 1
+	else:
+		print(old_pb+line_num+u'未處理的標記: ' + tag)
+
+def gaiji(mo):
+	zuzi=mo.group()
+	rs = win32com.client.Dispatch(r'ADODB.Recordset')
+	sql = u"SELECT cb FROM gaiji WHERE des='%s'" % zuzi
+	rs.Open(sql, conn, 1, 3)
+	if rs.RecordCount > 0:
+		cb = rs.Fields.Item('cb').Value
+		if not cb in gaijis:
+			gaijis[cb]={}
+			gaijis[cb]['des'] = zuzi
+		return '<g ref="#CB%s"></g>' % cb
+	else:
+		print u'組字式找不到: ' + zuzi
+		
+def do_chars(s):
+	global buf, char_count, div_head
+	char_count += myLength(s)
+	s = corr2app(s)
+	if mulu_start: 
+		div_head += s
+		buf += s
+	elif s!='': 
+		s=re.sub(r'\[[^>]+?\]', gaiji, s)
+		out(s)
+
+def do_text(s):
+	tokens = re.split('(<.*?>)', s)
+	for t in tokens:
+		if t.startswith('<'): inline_tag(t)
+		else: do_chars(t)
+	return s
+
+def check_open(*tags):
+	for t in tags:
+		if t in open:
+			while open[t]>0:
+				out1('</' + t + '>')
+				open[t] -= 1
+
+def get_number(s):
+	mo=re.search(r'\d+', s)
+	if mo==None: return ''
+	return mo.group(0)
+
+def record_open(tag):
+	if not tag in open: open[tag] = 0
+	open[tag] += 1
+
+def start_J(tag):
+	n = get_number(tag)
+	out(u'<juan fun="open" n="%s"><mulu type="卷" n="%s"/><jhead>' % (n, n))
+	record_open('juan')
+	record_open('jhead')
+	
+def start_byline(tag):
+	check_open('byline', 'jhead', 'juan')
+	if 'A' in tag:
+		out('<byline type="Author">')
+	elif 'B' in tag:
+		out('<byline type="Other">')
+	elif 'C' in tag:
+		out('<byline type="Collector">')
+	elif 'E' in tag:
+		out('<byline type="Editor">')
+	open['byline'] = 1
+	
+def start_x(tag):
+	global buf, div_head, mulu_start
+	start_div(1, 'xu')
+	buf += '<head>'
+	open['head'] = 1
+	mulu_start = True
+	div_head = ''
+	
+def do_line_head(tag):
+	if ('A' in tag) or ('B' in tag) or ('C' in tag) or ('E' in tag):
+		start_byline(tag)
+	elif 'I' in tag:
+		start_i(tag)
+		if 'P' in tag: start_p(tag)
+	elif 'J' in tag: start_J(tag)
+	elif 'P' in tag: start_p(tag)
+	elif 'Q' in tag: start_q(tag)
+	elif 'x' in tag: start_x(tag)
+	else: 
+		tag = tag.replace('#', '')
+		tag = tag.replace('_', '')
+		tag = tag.replace('W', '')
+		tag = tag.replace('k', '')
+		tag = tag.replace('r', '')
+		tag = re.sub(r'\d*', '', tag)
+		if tag!= '': print(old_pb+line_num+u'未處理的標記: ' + tag)
+		
+def close_sutra(num):
+	global buf1, gaijis, juan_num
+	out_path = dir_out+'/'+vol+num+'.xml'
+	print out_path
+	fo=codecs.open(out_path, 'w', 'utf8')
+	s = """<?xml version="1.0" encoding="utf-8"?>
+<TEI xmlns="http://www.tei-c.org/ns/1.0" xmlns:cb="http://www.cbeta.org/ns/1.0" xml:id="%s%s">\n""" % (vol, num)
+	n = num[1:]
+	s += """<teiHeader>
+	<fileDesc>
+		<titleStmt>
+			<title>Taisho Tripitaka, Electronic version, No. %s %s</title>\n""" % (n, sutras[n]['title'])
+	s += '\t\t\t<author>%s</author>\n' % sutras[n]['author']
+	s += u"""\t\t\t<respStmt><resp>Electronic Version by</resp><name>CBETA</name></respStmt>
+		</titleStmt>
+		<editionStmt>
+			<edition>$Revision: 1.1 $ (Big5)<date>$Date: 2011/06/30 06:00:30 $</date></edition>
+		</editionStmt>
+		<extent>%s卷</extent>\n""" % sutras[n]['juan']
+	v = vol[1:]
+	v = v.lstrip('0')
+	s += u"""\t\t<publicationStmt>
+			<distributor>
+				<name>中華電子佛典協會 (CBETA)</name>
+				<address><addrLine>service@cbeta.org</addrLine></address>
+			</distributor>
+			<availability>
+				<p>Available for non-commercial use when distributed with this header intact.</p>
+			</availability>
+			<date>$Date: 2011/06/30 06:00:30 $</date>
+		</publicationStmt>
+		<sourceDesc>
+			<bibl>Taisho Tripitaka Vol. %s, No. %s </bibl>\n""" % (v, n)
+	s += """\t\t</sourceDesc>
+	</fileDesc>
+	<encodingDesc>
+		<projectDesc>
+			<p xml:lang="en" cb:type="ly">%s</p>
+			<p xml:lang="zh" cb:type="ly">%s</p>
+		</projectDesc>\n""" % (sutras[n]['laiyuan_e'], sutras[n]['laiyuan_c'])
+	s += '\t\t<charDecl>\n'
+	for cb in gaijis:
+		s += '\t\t\t<char xml:id="CB%s">\n' % cb
+		s += '\t\t\t\t<charName>CBETA CHARACTER CB%s</charName>\n' % cb
+		s += '\t\t\t\t<charProp>\n'
+		s += '\t\t\t\t\t<localName>composition</localName>\n'
+		s += '\t\t\t\t\t<value>%s</value>\n' % gaijis[cb]['des']
+		s += '\t\t\t\t</charProp>\n'
+		s += '\t\t\t</char>\n'
+	s += '\t\t</charDecl>\n'
+	s += '\t</encodingDesc>\n'
+	s += """</teiHeader>
+<text>
+<body>"""
+	fo.write(s)
+	fo.write(buf1)
+	buf1 = ''
+	fo.write('\n</body></text></TEI>')
+	fo.close()
+	juan_num = 0
+	gaijis = {}
+	
+def convert():
+	global buf, char_count, fo, head_tag, line_num, mulu_start, old_pb
+	f1=codecs.open(cfg["jingwen"], "r", "utf8")
+	reo=re.compile(r'\[[^>\[]*?\]') # 組字式
+	old_num = ''
+	for line in f1:
+		char_count = 1
+		line=line.rstrip()
+		line=line.replace(u'<□>', '&unrec;')
+		aline = line[:20]
+		text = line[20:]
+		(vol, num, pb, line_num, head_tag) = struct.unpack("3s6s6s2s3s", aline);
+		num=num.rstrip('_')
+		pb=pb.lstrip('p')
+		if mulu_start and not 'Q=' in head_tag:
+			out1('<cb:mulu level="%d">%s</cb:mulu>' % (open['div'], div_head))
+			mulu_start = False
+			out('')
+			check_open('head')
+		if num!=old_num:
+			if old_num!='': close_sutra(old_num)
+			old_num = num
+		if pb != old_pb:
+			buf += '\n<pb n="%s" xml:id="%s.%s" ed="%s"/>' % (pb, vol, pb, ed)
+			old_pb = pb
+			
+		buf += '\n<lb n="%s" ed="%s"' % (pb+line_num, ed)
+		if 'k' in head_tag:
+			buf += ' type="honorific"'  # 強迫換行
+		buf += '/>'
+		
+		do_line_head(head_tag)
+		do_text(text)
+	close_sutra(old_num)
+	f1.close()
+	
+def read_source():
+	global sutras
+	fi=codecs.open(cfg["laiyuan"], 'r', 'utf8')
+	laiyuan={}
+	for line in fi:
+		line = line.rstrip()
+		if line[1:2]==':':
+			v=line[0:1]
+			l=line[2:].split(',')
+			laiyuan[v]=l
+		else:
+			fields = line.split()
+			if len(fields)<5: continue
+			if not fields[1][0:1] in 'TXJHW': continue
+			n = fields[1][1:5]
+			sutras[n] = {}
+			sutras[n]['title'] = fields[5]
+			sutras[n]['juan'] = fields[4]
+			s = ' '.join(fields[6:])
+			sutras[n]['author'] = s[1:-1]
+			c = ''
+			e = ''
+			for s in fields[0]:
+				c += laiyuan[s][0] + ','
+				e += laiyuan[s][1] + ','
+			sutras[n]['laiyuan_c'] = c.rstrip(',')
+			sutras[n]['laiyuan_e'] = e.rstrip(',')
+	fi.close()
+	
+# main
+# 準備存取 gaiji-m.mdb
+conn = win32com.client.Dispatch(r'ADODB.Connection')
+DSN = 'PROVIDER=Microsoft.Jet.OLEDB.4.0;DATA SOURCE=%s;' % gaiji_path
+print DSN
+conn.Open(DSN)
+
+read_source()
+convert()
